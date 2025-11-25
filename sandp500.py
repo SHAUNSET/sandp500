@@ -1,127 +1,110 @@
-'''
-Equal-Weight S&P 500 Index Fund
-
-Introduction & Library Imports
-The S&P 500 is the world's most popular stock market index. The largest fund that is benchmarked to this index is the SPDR® S&P 500® ETF Trust. It has more than US$250 billion of assets under management.
-
-The goal of this section of the course is to create a Python script that will accept the value of your portfolio and tell you how many shares of each S&P 500 constituent you should purchase to get an equal-weight version of the index fund.
-
-Library Imports
-The first thing we need to do is import the open-source software libraries that we'll be using in this tutorial.
-'''
 import numpy as np
-import pandas as pd 
-import requests 
+import pandas as pd
 import math
 import yfinance as yf
 import time
 
-
-'''
-Importing Our List of Stocks
-The next thing we need to do is import the constituents of the S&P 500.
-
-These constituents change over time, so in an ideal world you would connect directly to the index provider (Standard & Poor's) and pull their real-time constituents on a regular basis.
-
-Paying for access to the index provider's API is outside of the scope .
-'''
-
-stocks = pd.read_csv("sp_500_stocks.csv")
-print(stocks.head())
-
-
-'''
-Making Our First API Call
-Now it's time to structure our API calls to AlphaVantage.
-
-We need the following information from the API:
-
-Market capitalization for each stock
-Price of each stock
-'''
-
-symbol = 'AAPL'
-ticker = yf.Ticker(symbol)
-price = ticker.history(period="1d")['Close'].iloc[-1]
-
-# --- FIXED & RELIABLE MARKET CAP LOGIC ---
-market_cap = ticker.fast_info.get("market_cap")
-if market_cap is None:
-    try:
-        market_cap = ticker.info.get("marketCap", "N/A")
-    except:
-        market_cap = "N/A"
-
-print("Market Cap:", market_cap)
-print("Price:", price)
-
-
-'''
-Adding Our Stocks Data to a Pandas DataFrame
-The next thing we need to do is add our stock's price and market capitalization to a pandas DataFrame. 
-Think of a DataFrame like the Python version of a spreadsheet. It stores tabular data.
-'''
-
-my_columns = ['Ticker' , 'Stock Price' , 'Market Captilization' , 'Number of shares to buy']
-final_dataframe = pd.DataFrame(columns = my_columns)
+# -------------------------
+# Helper Functions
+# -------------------------
 
 def fix_ticker(symbol):
+    """Fix ticker symbols for Yahoo Finance format (e.g., BRK.B -> BRK-B)."""
     if "." in symbol:
         return symbol.replace(".", "-")
     return symbol
 
-for symbol in stocks['Ticker']:
+def fetch_stock_data(stocks_csv="sp_500_stocks_cleaned.csv", sleep_time=0.05):
+    """
+    Fetch prices and market capitalization for S&P 500 stocks.
+    
+    Returns:
+        pd.DataFrame: DataFrame with columns ['Ticker', 'Stock Price', 'Market Captilization', 'Number Of Shares to Buy', 'Amount Invested']
+    """
+    # Read CSV
+    stocks = pd.read_csv(stocks_csv)
+    
+    # Fix tickers for Yahoo Finance
+    tickers_list = [fix_ticker(sym) for sym in stocks['Ticker']]
+    
+    # Batch download prices for speed
+    data = yf.download(tickers_list, period="1d", group_by='ticker', threads=True, progress=False)
+    
+    final_df = []
+    failed_symbols = []
+    
+    for ticker_symbol in tickers_list:
+        try:
+            # Fetch price
+            if ticker_symbol in data:
+                price = data[ticker_symbol]['Close'].iloc[-1]
+            else:
+                price = "N/A"
+            
+            # Fetch market cap
+            ticker = yf.Ticker(ticker_symbol)
+            market_cap = ticker.fast_info.get("market_cap")
+            if market_cap is None:
+                try:
+                    info = ticker.info
+                    market_cap = info.get("marketCap", "N/A")
+                except:
+                    market_cap = "N/A"
+            
+            if price == "N/A":
+                failed_symbols.append(ticker_symbol)
+            
+            final_df.append([ticker_symbol, price, market_cap, 0, 0.0])
+            
+            # Small delay to avoid API rate limits
+            time.sleep(sleep_time)
+        
+        except:
+            final_df.append([ticker_symbol, "N/A", "N/A", 0, 0.0])
+            failed_symbols.append(ticker_symbol)
+    
+    # Convert to DataFrame
+    final_dataframe = pd.DataFrame(final_df, columns=['Ticker', 'Stock Price', 'Market Captilization', 'Number Of Shares to Buy', 'Amount Invested'])
+    
+    # Remove failed symbols
+    final_dataframe = final_dataframe[final_dataframe['Stock Price'] != "N/A"].reset_index(drop=True)
+    
+    return final_dataframe
 
-    yf_symbol = fix_ticker(symbol)
+def allocate_portfolio(final_dataframe, portfolio_value=100000):
+    """
+    Calculate number of shares to buy and amount invested per stock for an equal-weight portfolio.
+    
+    Args:
+        final_dataframe (pd.DataFrame): DataFrame from fetch_stock_data()
+        portfolio_value (float): Total portfolio value
+    
+    Returns:
+        pd.DataFrame: Updated DataFrame with allocation
+    """
+    position_size = portfolio_value / len(final_dataframe)
+    
+    for i in range(len(final_dataframe)):
+        price = final_dataframe.loc[i, 'Stock Price']
+        if price != "N/A":
+            shares_to_buy = math.floor(position_size / price)
+            final_dataframe.loc[i, 'Number Of Shares to Buy'] = shares_to_buy
+            final_dataframe.loc[i, 'Amount Invested'] = round(shares_to_buy * price, 2)
+    
+    return final_dataframe
 
-    # --- NEW: small delay to protect from rate limits ---
-    time.sleep(0.10)
+def save_portfolio(final_dataframe, filename="equal_weight_sp500.xlsx"):
+    """
+    Save portfolio DataFrame to Excel.
+    """
+    final_dataframe.to_excel(filename, index=False)
+    print(f"✅ Portfolio saved to '{filename}'")
 
-    try:
-        ticker = yf.Ticker(yf_symbol)
-
-        hist = ticker.history(period="1d", timeout=5)
-        if hist.empty:
-            price = "N/A"
-        else:
-            price = hist['Close'].iloc[-1]
-
-        # --- FIXED & RELIABLE MARKET CAP LOGIC ---
-        market_cap = ticker.fast_info.get("market_cap")
-        if market_cap is None:
-            try:
-                info = ticker.info
-                market_cap = info.get("marketCap", "N/A")
-            except:
-                market_cap = "N/A"
-
-    except Exception:
-        price = "N/A"
-        market_cap = "N/A"
-
-    final_dataframe = pd.concat(
-        [final_dataframe, pd.DataFrame([[symbol, price, market_cap, 'N/A']], columns=my_columns)],
-        ignore_index=True
-    )
-
-
-portfolio_size = input("Enter Value of Portfolio : ")
-
-try:
-    val = float(portfolio_size)
-except ValueError:
-    print("That's not a number! \n Try again:")
-    portfolio_size = input("Enter the value of your portfolio:")
-
-
-position_size = float(portfolio_size) / len(final_dataframe.index)
-
-for i in range(0, len(final_dataframe['Ticker'])-1):
-    if final_dataframe['Stock Price'][i] != "N/A":
-        final_dataframe.loc[i, 'Number Of Shares to Buy'] = math.floor(
-            position_size / final_dataframe['Stock Price'][i]
-        )
-    else:
-        final_dataframe.loc[i, 'Number Of Shares to Buy'] = "N/A"
-
-final_dataframe
+# -------------------------
+# Example Usage
+# -------------------------
+if __name__ == "__main__":
+    df = fetch_stock_data("sp_500_stocks_cleaned.csv")
+    df = allocate_portfolio(df, portfolio_value=100000)
+    save_portfolio(df)
+    print(df.head(10))
