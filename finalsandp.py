@@ -1,79 +1,171 @@
-# finalsandp.py
-import pandas as pd
-import yfinance as yf
+"""
+Equal-Weight S&P 500 Index Fund (Pure Equal Weight Version)
+
+This version:
+- Reads CSV of S&P 500 tickers
+- Fetches latest close prices with fallback
+- Assigns TRUE equal-weight allocation:
+      position_size = portfolio_value / total_stocks
+      shares = floor(position_size / price)
+- Saves final dataframe
+"""
+
 import math
 import time
+import numpy as np
+import pandas as pd
+import yfinance as yf
 
-def fix_ticker(symbol):
-    """Fix Yahoo Finance tickers (e.g., BRK.B -> BRK-B)"""
-    return symbol.replace(".", "-") if "." in symbol else symbol
 
-def create_equal_weight_portfolio(portfolio_value, csv_path="sp_500_stocks_cleaned.csv"):
-    """
-    Fetch S&P 500 stock data and compute an equal-weight portfolio.
+# ----------------------------------------------
+# FIX TICKERS FOR YAHOO FINANCE
+# ----------------------------------------------
+def fix_ticker(symbol: str) -> str:
+    if "." in symbol:
+        return symbol.replace(".", "-")
+    return symbol
 
-    Args:
-        portfolio_value (float): Total portfolio value in dollars
-        csv_path (str): Path to CSV of tickers
 
-    Returns:
-        pd.DataFrame: Portfolio with ticker, price, market cap, shares to buy, amount invested
-    """
-    # Load tickers
+# ----------------------------------------------
+# BATCH PRICE DOWNLOAD (WITH FALLBACK)
+# ----------------------------------------------
+def _download_close_prices(tickers_list, period="1d"):
+    if not tickers_list:
+        return pd.DataFrame()
+
+    try:
+        data = yf.download(
+            tickers_list,
+            period=period,
+            group_by='ticker',
+            threads=True,
+            progress=False
+        )
+    except:
+        return pd.DataFrame()
+
+    # Multi-Index case (most common)
+    if isinstance(data, pd.DataFrame) and isinstance(data.columns, pd.MultiIndex):
+        try:
+            close_df = data.xs("Close", axis=1, level=1)
+        except:
+            close_df = pd.DataFrame()
+        return close_df
+
+    # Single-ticker case
+    if isinstance(data, pd.DataFrame) and "Close" in data.columns:
+        if len(tickers_list) == 1:
+            return pd.DataFrame({tickers_list[0]: data["Close"]})
+
+    return pd.DataFrame()
+
+
+# ----------------------------------------------
+# MAIN FUNCTION
+# ----------------------------------------------
+def create_equal_weight_portfolio(portfolio_value: float,
+                                  csv_path="sp_500_stocks_cleaned.csv",
+                                  sleep_between=0.02):
+
     stocks = pd.read_csv(csv_path)
 
-    my_columns = ['Ticker', 'Stock Price', 'Market Captilization', 'Number Of Shares to Buy', 'Amount Invested']
-    final_dataframe = pd.DataFrame(columns=my_columns)
+    tickers_raw = stocks["Ticker"].astype(str).to_list()
+    tickers_list = [fix_ticker(t) for t in tickers_raw]
 
-    tickers_list = [fix_ticker(sym) for sym in stocks['Ticker']]
-    
-    # Batch download prices
-    try:
-        data = yf.download(tickers_list, period="1d", group_by='ticker', threads=True, progress=False)
-    except Exception as e:
-        print("❌ Error fetching data:", e)
-        return pd.DataFrame()  # empty DF
-    
-    final_df = []
+    # Fetch prices
+    close_df = _download_close_prices(tickers_list)
+
+    rows = []
+    failed_symbols = []
+
     for ticker_symbol in tickers_list:
+        price = np.nan
+
+        # Try from batch
+        if not close_df.empty and ticker_symbol in close_df.columns:
+            try:
+                price = float(close_df[ticker_symbol].dropna().iloc[-1])
+            except:
+                price = np.nan
+
+        # Single ticker fallback
+        if np.isnan(price):
+            try:
+                tmp = yf.Ticker(ticker_symbol).history(period="1d")
+                if not tmp.empty:
+                    price = float(tmp["Close"].iloc[-1])
+            except:
+                price = np.nan
+
+        # Market Cap (optional)
+        market_cap = "N/A"
         try:
-            # Price
-            if ticker_symbol in data:
-                price = data[ticker_symbol]['Close'].iloc[-1]
-            else:
-                price = "N/A"
+            tkr = yf.Ticker(ticker_symbol)
+            mc = None
 
-            # Market cap
-            ticker = yf.Ticker(ticker_symbol)
-            market_cap = ticker.fast_info.get("market_cap")
-            if market_cap is None:
+            try:
+                mc = tkr.fast_info.get("market_cap")
+            except:
+                mc = None
+
+            if mc is None:
+                info = {}
                 try:
-                    info = ticker.info
-                    market_cap = info.get("marketCap", "N/A")
+                    info = tkr.info
                 except:
-                    market_cap = "N/A"
-
-            final_df.append([ticker_symbol, price, market_cap, 0, 0.0])
-            time.sleep(0.05)  # rate limit
+                    pass
+                market_cap = info.get("marketCap", "N/A")
+            else:
+                market_cap = mc
 
         except:
-            final_df.append([ticker_symbol, "N/A", "N/A", 0, 0.0])
+            market_cap = "N/A"
 
-    final_dataframe = pd.DataFrame(final_df, columns=my_columns)
+        if np.isnan(price):
+            failed_symbols.append(ticker_symbol)
+        else:
+            rows.append([ticker_symbol, price, market_cap, 0, 0.0])
 
-    # Remove failed symbols
-    final_dataframe = final_dataframe[final_dataframe['Stock Price'] != "N/A"].reset_index(drop=True)
+        time.sleep(sleep_between)
+
+    # Build dataframe
+    cols = ["Ticker", "Stock Price", "Market Captilization",
+            "Number Of Shares to Buy", "Amount Invested"]
+    final_dataframe = pd.DataFrame(rows, columns=cols)
 
     if final_dataframe.empty:
-        print("❌ No valid stock data fetched. Check CSV or internet connection.")
-        return pd.DataFrame()  # empty DF
+        return final_dataframe, failed_symbols
 
-    # Portfolio allocation
-    position_size = portfolio_value / len(final_dataframe)
-    for i in range(len(final_dataframe)):
-        price = final_dataframe.loc[i, 'Stock Price']
-        shares_to_buy = math.floor(position_size / price)
-        final_dataframe.loc[i, 'Number Of Shares to Buy'] = shares_to_buy
-        final_dataframe.loc[i, 'Amount Invested'] = round(shares_to_buy * price, 2)
+    # ----------------------------------------------
+    # PURE EQUAL-WEIGHT MATH (YOUR ORIGINAL LOGIC)
+    # ----------------------------------------------
+    n_stocks = len(final_dataframe.index)
+    position_size = float(portfolio_value) / n_stocks
 
-    return final_dataframe
+    for idx in final_dataframe.index:
+        price = final_dataframe.at[idx, "Stock Price"]
+        shares = math.floor(position_size / price)
+
+        final_dataframe.at[idx, "Number Of Shares to Buy"] = shares
+        final_dataframe.at[idx, "Amount Invested"] = round(shares * price, 2)
+
+    return final_dataframe, failed_symbols
+
+
+# ----------------------------------------------
+# RUN FROM TERMINAL (OPTIONAL)
+# ----------------------------------------------
+if __name__ == "__main__":
+    import sys
+
+    pv = 100000
+    if len(sys.argv) > 1:
+        try:
+            pv = float(sys.argv[1])
+        except:
+            pass
+
+    df, failed = create_equal_weight_portfolio(pv)
+    print("Total Stocks:", len(df))
+    print("Failed:", len(failed))
+    print(df.head(10))
